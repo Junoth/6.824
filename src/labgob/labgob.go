@@ -55,14 +55,14 @@ func (dec *LabDecoder) Decode(e interface{}) error {
 	return dec.gob.Decode(e)
 }
 
-func Register(value interface{}) {
+func (value interface{}) {
 	checkValue(value)
-	gob.Register(value)
+	gob.(value)
 }
 
-func RegisterName(name string, value interface{}) {
+func Name(name string, value interface{}) {
 	checkValue(value)
-	gob.RegisterName(name, value)
+	gob.Name(name, value)
 }
 
 func checkValue(value interface{}) {

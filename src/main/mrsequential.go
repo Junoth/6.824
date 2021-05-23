@@ -23,11 +23,13 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 func main() {
+	// get input
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: mrsequential xxx.so inputfiles...\n")
 		os.Exit(1)
 	}
 
+	// get map, reduce function from plugin
 	mapf, reducef := loadPlugin(os.Args[1])
 
 	//
@@ -37,6 +39,7 @@ func main() {
 	//
 	intermediate := []mr.KeyValue{}
 	for _, filename := range os.Args[2:] {
+		// for every input file, open and read content
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
@@ -46,7 +49,9 @@ func main() {
 			log.Fatalf("cannot read %v", filename)
 		}
 		file.Close()
+		// mapf function should return kv array
 		kva := mapf(filename, string(content))
+		// intermediate append kv array to end
 		intermediate = append(intermediate, kva...)
 	}
 
@@ -56,8 +61,10 @@ func main() {
 	// rather than being partitioned into NxM buckets.
 	//
 
+	// sort intermediate file
 	sort.Sort(ByKey(intermediate))
 
+	// create output file
 	oname := "mr-out-0"
 	ofile, _ := os.Create(oname)
 

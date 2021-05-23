@@ -15,11 +15,13 @@ import "os"
 import "fmt"
 
 func main() {
+	// get input
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
 		os.Exit(1)
 	}
 
+	// pass into all input files and reduce number(fix as 10)
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
