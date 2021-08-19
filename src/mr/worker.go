@@ -3,14 +3,14 @@ package mr
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io/ioutil"
+	"log"
+	"net/rpc"
 	"os"
 	"sort"
 	"time"
 )
-import "log"
-import "net/rpc"
-import "hash/fnv"
 
 //
 // Map functions return a slice of KeyValue.
@@ -60,10 +60,10 @@ func mapWorker(filename string, taskId int, reduceNum int, mapf func(string, str
 		buckets[index] = append(buckets[index], kva[i])
 	}
 
-	for i := 0; i < len(buckets); i++ {
-		// create intermediate file
+	for i := 0; i < reduceNum; i++ {
+		// create temp file
 		oname := fmt.Sprintf("mr-%d-%d", taskId, i)
-		ofile, _ := os.Create(oname)
+		ofile, _ := ioutil.TempFile("", "map")
 		defer ofile.Close()
 
 		// write kv as json into files
@@ -74,6 +74,9 @@ func mapWorker(filename string, taskId int, reduceNum int, mapf func(string, str
 				log.Fatal("Encoding:", err)
 			}
 		}
+
+		// rename the file to intermediate file
+		os.Rename(ofile.Name(), oname)
 	}
 }
 

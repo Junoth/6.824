@@ -3,27 +3,45 @@ package mr
 import (
 	"errors"
 	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
 	"sync"
+	"time"
 )
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+
+type JobStatus int
+
+const (
+	Ready JobStatus = iota
+	Progress
+	Finish
+)
+
+type MapTask struct {
+	taskName string
+	status   JobStatus
+	stTime   time.Time
+}
+
+type ReduceTask struct {
+	status JobStatus
+	stTime time.Time
+}
 
 // SafeMapTaskManager define a safe map manager struct for concurrent case
 type SafeMapTaskManager struct {
-	taskQueue     []string               // task queue ready to be assigned
-	lock          sync.Mutex             // lock
-	nextId		  int					 // next task id
-	taskDone      int					 // number of finished tasks
+	tasks    []MapTask  // task queue ready to be assigned
+	lock     sync.Mutex // lock
+	taskDone int        // number of finished tasks
 }
 
 // SafeReduceTaskManager define a safe reduce manager struct for concurrent case
 type SafeReduceTaskManager struct {
-	reduceNum     int                    // total reduce number
-	lock          sync.Mutex         	 // lock
-	nextId        int 				 	 // next task id
-	taskDone      int                	 // number of finished tasks
+	tasks    []ReduceTask
+	lock     sync.Mutex // lock
+	taskDone int        // number of finished tasks
 }
 
 // Coordinator
@@ -32,9 +50,9 @@ type SafeReduceTaskManager struct {
 // need a list of input files that are already done
 //
 type Coordinator struct {
-	mapManager				*SafeMapTaskManager
-	reduceManager           *SafeReduceTaskManager
-	mapDone					bool
+	mapManager    *SafeMapTaskManager
+	reduceManager *SafeReduceTaskManager
+	nReduce       int
 }
 
 // AssignTask define safe assign task method for map task manager
@@ -43,21 +61,36 @@ func (m *SafeMapTaskManager) AssignTask() (int, string) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	if len(m.taskQueue) == m.nextId {
-		return -1, ""
+	for i, t := range m.tasks {
+		now := time.Now()
+		switch t.status {
+		case Finish:
+			continue
+		case Ready:
+			m.tasks[i].stTime = now
+			m.tasks[i].status = Progress
+			log.Printf("Map task %d, %s is assigned\n", i, t.taskName)
+			return i, t.taskName
+		case Progress:
+			if now.Sub(t.stTime).Seconds() > 10 {
+				// assume the worker is dead, try to reassign
+				m.tasks[i].stTime = now
+				return i, t.taskName
+			}
+		default:
+			panic("Invalid status")
+		}
 	}
-	ele := m.taskQueue[m.nextId]
-	m.nextId = m.nextId + 1
 
-	log.Printf("Map task %v assigned\n", m.nextId - 1)
-	return m.nextId - 1, ele
+	// all tasks in progress or finished
+	return -1, ""
 }
 
 func (m *SafeMapTaskManager) FinishTask(taskId int) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	log.Printf("Map task %v finished\n", taskId)
+	m.tasks[taskId].status = Finish
 	m.taskDone = m.taskDone + 1
 }
 
@@ -66,7 +99,7 @@ func (m *SafeMapTaskManager) MapDone() bool {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	return m.taskDone == len(m.taskQueue)
+	return m.taskDone == len(m.tasks)
 }
 
 // AssignTask define safe assign task method for reduce task manager
@@ -75,20 +108,36 @@ func (m *SafeReduceTaskManager) AssignTask() int {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	if m.nextId == m.reduceNum {
-		return -1
+	for i, t := range m.tasks {
+		now := time.Now()
+		switch t.status {
+		case Finish:
+			continue
+		case Ready:
+			m.tasks[i].stTime = now
+			m.tasks[i].status = Progress
+			log.Printf("Reduce task %d is assigned\n", i)
+			return i
+		case Progress:
+			if now.Sub(t.stTime).Seconds() > 10 {
+				// assume the worker is dead, try to reassign
+				m.tasks[i].stTime = now
+				return i
+			}
+		default:
+			panic("Invalid status")
+		}
 	}
-	m.nextId = m.nextId + 1
 
-	log.Printf("Reduce task %v assigned\n", m.nextId - 1)
-	return m.nextId - 1
+	// all tasks in progress or finished
+	return -1
 }
 
 func (m *SafeReduceTaskManager) FinishTask(taskId int) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	log.Printf("Reduce task %v finished\n", taskId)
+	m.tasks[taskId].status = Finish
 	m.taskDone = m.taskDone + 1
 }
 
@@ -97,13 +146,13 @@ func (m *SafeReduceTaskManager) ReduceDone() bool {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	return m.taskDone == m.reduceNum
+	return m.taskDone == len(m.tasks)
 }
 
 // GetTask rpc function for worker to call when try to get task
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	if c.mapDone {
-		if c.Done() {
+	if c.mapManager.MapDone() {
+		if c.reduceManager.ReduceDone() {
 			return errors.New("Mr task done, pls exit")
 		}
 
@@ -113,7 +162,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		reply.IsMap = false
 		reply.TaskId = i
 		reply.File = "" // we don't need file name for reduce
-		reply.Num = len(c.mapManager.taskQueue)
+		reply.Num = len(c.mapManager.tasks)
 		return nil
 	}
 
@@ -122,20 +171,17 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	reply.IsMap = true
 	reply.File = file
 	reply.TaskId = i
-	reply.Num = c.reduceManager.reduceNum
+	reply.Num = c.nReduce
 	return nil
 }
 
 // FinishTask rpc function for worker to call when task finished
 func (c *Coordinator) FinishTask(args *FinishTaskArgs, reply *FinishTaskReply) error {
-	if c.mapDone {
+	if c.mapManager.MapDone() {
 		// reduce now
 		c.reduceManager.FinishTask(args.TaskId)
 	} else {
 		c.mapManager.FinishTask(args.TaskId)
-		if c.mapManager.MapDone() {
-			c.mapDone = true
-		}
 	}
 
 	return nil
@@ -174,8 +220,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.mapManager = &SafeMapTaskManager{}
 	c.reduceManager = &SafeReduceTaskManager{}
-	c.mapManager.taskQueue = files[:]
-	c.reduceManager.reduceNum = nReduce
+	c.nReduce = nReduce
+	for _, f := range files {
+		mapTask := MapTask{taskName: f, status: Ready, stTime: time.Now()}
+		c.mapManager.tasks = append(c.mapManager.tasks, mapTask)
+	}
+	for i := 0; i < nReduce; i++ {
+		reduceTask := ReduceTask{status: Ready, stTime: time.Now()}
+		c.reduceManager.tasks = append(c.reduceManager.tasks, reduceTask)
+	}
 	c.server()
 	return &c
 }
