@@ -172,12 +172,7 @@ func Worker(mapf func(string, string) []KeyValue,
 func CallGetTask(reply *GetTaskReply) bool {
 	// send the RPC request, wait for the reply
 	args := &GetTaskArgs{}
-	ret := call("Coordinator.GetTask", args, reply)
-	if !ret {
-		log.Fatal("RPC calling for getting task fails")
-	}
-
-	return ret
+	return call("Coordinator.GetTask", args, reply)
 }
 
 //
@@ -191,12 +186,7 @@ func CallFinishTask(taskId int) bool {
 	reply := &FinishTaskReply{}
 
 	// send the RPC request
-	ret := call("Coordinator.FinishTask", &args, reply)
-	if !ret {
-		log.Fatal("RPC calling for finishing task fails")
-	}
-
-	return ret
+	return call("Coordinator.FinishTask", &args, reply)
 }
 
 //
@@ -218,6 +208,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	// fmt.Println(err)
 	return false
 }

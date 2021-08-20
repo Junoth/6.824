@@ -69,7 +69,7 @@ func (m *SafeMapTaskManager) AssignTask() (int, string) {
 		case Ready:
 			m.tasks[i].stTime = now
 			m.tasks[i].status = Progress
-			log.Printf("Map task %d, %s is assigned\n", i, t.taskName)
+			// log.Printf("Map task %d, %s is assigned\n", i, t.taskName)
 			return i, t.taskName
 		case Progress:
 			if now.Sub(t.stTime).Seconds() > 10 {
@@ -116,7 +116,7 @@ func (m *SafeReduceTaskManager) AssignTask() int {
 		case Ready:
 			m.tasks[i].stTime = now
 			m.tasks[i].status = Progress
-			log.Printf("Reduce task %d is assigned\n", i)
+			// log.Printf("Reduce task %d is assigned\n", i)
 			return i
 		case Progress:
 			if now.Sub(t.stTime).Seconds() > 10 {
