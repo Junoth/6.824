@@ -440,6 +440,8 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
+		//fmt.Printf("Server %v has log length %v, index is %v, log map is %v, cmd1 is %v, ok is %v\n",
+		//	i, len(cfg.logs[i]), index, cfg.logs[i], cmd1, ok)
 		cfg.mu.Unlock()
 
 		if ok {
@@ -451,6 +453,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			cmd = cmd1
 		}
 	}
+	//fmt.Printf("count is %v and cmd %v\n", count, cmd)
 	return count, cmd
 }
 
