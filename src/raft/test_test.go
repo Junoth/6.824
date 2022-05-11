@@ -395,6 +395,8 @@ func TestRejoin2B(t *testing.T) {
 	// old leader connected again
 	cfg.connect(leader1)
 
+	fmt.Printf("Try to connect to leader1 %v\n", leader1)
+
 	cfg.one(104, 2, true)
 
 	// all together now
