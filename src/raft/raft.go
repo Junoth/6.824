@@ -130,7 +130,7 @@ func (rf *Raft) persist() {
 	data := buf.Bytes()
 	rf.persister.SaveRaftState(data)
 
-	DPrintf("Server %v persist\n", rf.me)
+	DPrintf("Server %v persist with state %v\n", rf.me, rf)
 }
 
 //
@@ -349,22 +349,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		reply.Success = true
 		// only append entries when prev log matches
-		for i, entry := range args.Entries {
-			// for simplicity, we'll just override/append entries
-			if i+args.PrevLogIndex+1 >= len(rf.Log) {
-				rf.Log = append(rf.Log, entry)
-			} else {
-				rf.Log[i+args.PrevLogIndex+1] = entry
-			}
-		}
+		rf.Log = append(rf.Log[:args.PrevLogIndex+1], args.Entries...)
 
 		// persist before commit
 		rf.persist()
 
 		// commit only when log actually matched
-		updateCommitIndex := rf.commitIndex
 		if args.LeaderCommit > rf.commitIndex {
-			updateCommitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+			updateCommitIndex := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 
 			for i := rf.commitIndex + 1; i <= updateCommitIndex; i++ {
 				applyMsg := &ApplyMsg{}
@@ -420,8 +412,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 	rf.mu.Unlock()
 
-	DPrintf("node %v with arg %v tries to request vote from node %v\n",
-		args.CandidateId, args, server)
+	DPrintf("node %v with arg %v tries to request vote from node %v, current state is %v\n",
+		args.CandidateId, args, server, rf)
 
 	// make rpc call
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
@@ -470,8 +462,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	}
 	rf.mu.Unlock()
 
-	DPrintf("node %v with arg %v tries to append entries to %v\n",
-		args.LeaderId, args, server)
+	DPrintf("node %v with arg %v tries to append entries to %v, current state is %v\n",
+		args.LeaderId, args, server, rf)
 
 	// make rpc call
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
