@@ -102,6 +102,7 @@ type Raft struct {
 	lastApplied int
 	nextIndex   []int
 	matchIndex  []int
+	commitMsgs  []ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -195,7 +196,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 	lastIncludedIndex -= 1
 
-	if lastIncludedIndex < rf.LastIncludedIndex {
+	if lastIncludedIndex <= rf.LastIncludedIndex {
 		// old snapshot
 		return false
 	}
@@ -231,6 +232,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	if index <= rf.LastIncludedIndex+1 {
+		return
+	}
 
 	index -= 1
 	relativeIndex := rf.getRelativeIndex(index)
@@ -425,7 +430,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex == rf.LastIncludedIndex {
 		reply.Success = args.PrevLogTerm == rf.LastIncludedTerm
 	} else if args.PrevLogIndex > rf.LastIncludedIndex && args.PrevLogIndex <= rf.getLastLogIndex() {
-		DPrintf("We got prev log index and last log index")
+		//DPrintf("We got prev log index and last log index")
 		if len(rf.Log) == 0 {
 			reply.Success = args.PrevLogIndex == rf.getLastLogIndex() && args.PrevLogTerm == rf.getLastLogTerm()
 		} else {
@@ -466,30 +471,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.LeaderCommit > rf.commitIndex {
 			updateCommitIndex := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 
-			msgs := make([]*ApplyMsg, 0)
 			startIndex := max(rf.commitIndex+1, rf.LastIncludedIndex+1)
 			endIndex := min(updateCommitIndex, rf.getLastLogIndex())
 			for i := startIndex; i <= endIndex; i++ {
-				applyMsg := &ApplyMsg{}
+				applyMsg := ApplyMsg{}
 				applyMsg.Command = rf.getLog(i).Command
 				applyMsg.CommandIndex = i + 1
 				applyMsg.CommandValid = true
 
-				DPrintf("Follower server %v try to commit index %d and command %v",
-					rf.me, i+1, rf.getLog(i).Command)
-
-				msgs = append(msgs, applyMsg)
-				rf.commitIndex = i
+				rf.commitMsgs = append(rf.commitMsgs, applyMsg)
 			}
+			rf.commitIndex = max(rf.commitIndex, endIndex)
 
 			// persist before commit
 			rf.persist()
-
-			rf.mu.Unlock()
-			for _, msg := range msgs {
-				rf.applyCh <- *msg
-			}
-			rf.mu.Lock()
 		}
 	}
 
@@ -533,7 +528,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	DPrintf("Follower server %v try to send snapshot %v", rf.me, applyMsg)
 
-	// presist
+	// persist
 	rf.persist()
 
 	rf.mu.Unlock()
@@ -677,28 +672,21 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		cp := make([]int, len(rf.matchIndex))
 		copy(cp, rf.matchIndex)
 		sort.Sort(sort.Reverse(sort.IntSlice(cp)))
-		msgs := make([]*ApplyMsg, 0)
 		if cp[len(cp)/2] > rf.LastIncludedIndex && cp[len(cp)/2] <= rf.getLastLogIndex() && rf.getLog(cp[len(cp)/2]).Term == rf.CurrentTerm {
 			startIndex := max(rf.commitIndex+1, rf.LastIncludedIndex+1)
 			endIndex := min(cp[len(cp)/2], rf.getLastLogIndex())
 			for i := startIndex; i <= endIndex; i++ {
-				applyMsg := &ApplyMsg{}
+				applyMsg := ApplyMsg{}
 				applyMsg.Command = rf.getLog(i).Command
 				applyMsg.CommandIndex = i + 1
 				applyMsg.CommandValid = true
-
-				msgs = append(msgs, applyMsg)
-
-				rf.commitIndex = i
+				rf.commitMsgs = append(rf.commitMsgs, applyMsg)
 			}
+			rf.commitIndex = max(rf.commitIndex, endIndex)
 		}
 
 		rf.persist()
-
 		rf.mu.Unlock()
-		for _, msg := range msgs {
-			rf.applyCh <- *msg
-		}
 	} else {
 		if reply.FirstTermIndex <= rf.LastIncludedIndex {
 			// we need to install snapshot
@@ -707,10 +695,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			return rf.sendInstallSnapshot(server, newArgs, newReply)
 		} else {
 			// retry
-			rf.nextIndex[server] = reply.FirstTermIndex
-			newArgs, newReply := rf.getAppendEntriesPara(server)
+			if reply.FirstTermIndex <= rf.getLastLogIndex() {
+				rf.nextIndex[server] = reply.FirstTermIndex
+				newArgs, newReply := rf.getAppendEntriesPara(server)
+				rf.mu.Unlock()
+				return rf.sendAppendEntries(server, newArgs, newReply)
+			}
 			rf.mu.Unlock()
-			return rf.sendAppendEntries(server, newArgs, newReply)
 		}
 	}
 
@@ -804,6 +795,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.me, rf.State, rf.CurrentTerm, len(rf.Log), index+1)
 
 	rf.persist()
+	rf.broadcastHeartbeat()
+	rf.Ticker = rf.getHeartbeatTime()
 
 	return index + 1, rf.CurrentTerm, true
 }
@@ -836,8 +829,8 @@ func (rf *Raft) ticker() {
 	// we'll set it to 120 ms
 	heartbeatInterval := rf.getHeartbeatTime()
 
-	// interval 20ms
-	tickInterval := int32(20)
+	// interval 5ms
+	tickInterval := int32(30)
 
 	for rf.killed() == false {
 		// Your code here to check if a leader election should
@@ -870,6 +863,39 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) commitCommand() {
+	for rf.killed() == false {
+		time.Sleep(time.Duration(2) * time.Millisecond)
+		rf.mu.Lock()
+		if len(rf.commitMsgs) == 0 {
+			rf.mu.Unlock()
+			continue
+		}
+		applyMsgs := make([]ApplyMsg, len(rf.commitMsgs))
+		copy(applyMsgs, rf.commitMsgs)
+		rf.commitMsgs = rf.commitMsgs[:0]
+		rf.mu.Unlock()
+		for _, msg := range applyMsgs {
+			rf.applyCh <- msg
+			DPrintf("Server %v: commit msg %v", rf.me, msg)
+		}
+	}
+}
+
+func (rf *Raft) GetRaftStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) GetSnapshot() []byte {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return rf.persister.ReadSnapshot()
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -898,6 +924,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.VoteNum = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+	rf.commitMsgs = make([]ApplyMsg, 0)
 
 	// initial value is -1 to match with slice index
 	rf.commitIndex = -1
@@ -919,6 +946,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	// start commit goroutine
+	go rf.commitCommand()
 
 	return rf
 }

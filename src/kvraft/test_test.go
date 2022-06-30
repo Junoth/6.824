@@ -394,12 +394,16 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 
 	// wait until first op completes, so we know a leader is elected
 	// and KV servers are ready to process client requests
+	//fmt.Println("Test: Get for X")
 	ck.Get("x")
 
 	start := time.Now()
+	//fmt.Println("Test: start 1000 calls")
 	for i := 0; i < numOps; i++ {
+		//fmt.Printf("Test: start %v call\n", i)
 		ck.Append("x", "x 0 "+strconv.Itoa(i)+" y")
 	}
+	fmt.Println("Test: finish 1000 calls")
 	dur := time.Since(start)
 
 	v := ck.Get("x")
