@@ -29,13 +29,16 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK             = "OK"
+	ErrWrongLeader = "ErrWrongLeader"
 )
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	Servers   map[int][]string // new GID -> servers mappings
+	RequestId int64
+	ClientId  int64
 }
 
 type JoinReply struct {
@@ -44,7 +47,9 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs      []int
+	RequestId int64
+	ClientId  int64
 }
 
 type LeaveReply struct {
@@ -53,8 +58,10 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	Shard     int
+	GID       int
+	RequestId int64
+	ClientId  int64
 }
 
 type MoveReply struct {
@@ -63,11 +70,31 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	Num       int // desired config number
+	RequestId int64
+	ClientId  int64
 }
 
 type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+const (
+	JOIN  = "JOIN"
+	LEAVE = "LEAVE"
+	MOVE  = "MOVE"
+	QUERY = "QUERY"
+)
+
+type RequestContext struct {
+	commitChan chan byte
+	op         Op
+	Value      Config
+}
+
+type CommitContext struct {
+	CommitOp Op
+	Value    []Config
 }

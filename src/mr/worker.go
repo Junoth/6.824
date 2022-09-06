@@ -12,9 +12,7 @@ import (
 	"time"
 )
 
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
@@ -28,10 +26,8 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -134,9 +130,7 @@ func reduceWorker(taskId int, mapNum int, reducef func(string, []string) string)
 	ofile.Close()
 }
 
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	// give thread id to worker
@@ -164,22 +158,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-//
 // function to call coordinator for task
 //
 // the RPC argument and reply types are defined in rpc.go
-//
 func CallGetTask(reply *GetTaskReply) bool {
 	// send the RPC request, wait for the reply
 	args := &GetTaskArgs{}
 	return call("Coordinator.GetTask", args, reply)
 }
 
-//
 // function to call coordinator for finishing a task
 //
 // the RPC argument and reply types are defined in rpc.go
-//
 func CallFinishTask(taskId int) bool {
 	// declare get task arg and reply
 	args := FinishTaskArgs{taskId}
@@ -189,11 +179,9 @@ func CallFinishTask(taskId int) bool {
 	return call("Coordinator.FinishTask", &args, reply)
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()

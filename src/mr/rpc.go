@@ -9,20 +9,20 @@ package mr
 import "os"
 import "strconv"
 
-type GetTaskArgs struct {}
+type GetTaskArgs struct{}
 
 type GetTaskReply struct {
-	IsMap    	bool
-	File     	string
-	TaskId	 	int
-	Num 		int     // for map worker is the reduce file num, for reduce worker is the map file num
+	IsMap  bool
+	File   string
+	TaskId int
+	Num    int // for map worker is the reduce file num, for reduce worker is the map file num
 }
 
 type FinishTaskArgs struct {
-	TaskId   int
+	TaskId int
 }
 
-type FinishTaskReply struct {}
+type FinishTaskReply struct{}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
