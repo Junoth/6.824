@@ -23,6 +23,7 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"math/rand"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -446,7 +447,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			// check if all entries match
 			for i := args.PrevLogIndex + 1; i <= args.PrevLogIndex+len(args.Entries); i++ {
-				if args.Entries[i-args.PrevLogIndex-1] != rf.getLog(i) {
+				// have to use DeepEqual since Log content may not have equality defined
+				// e.x: []string
+				if !reflect.DeepEqual(args.Entries[i-args.PrevLogIndex-1], rf.getLog(i)) {
 					rf.Log = append(rf.Log[:rf.getRelativeIndex(args.PrevLogIndex)+1], args.Entries...)
 					break
 				}

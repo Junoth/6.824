@@ -89,6 +89,7 @@ func TestBasic(t *testing.T) {
 
 	cfa := make([]Config, 6)
 	cfa[0] = ck.Query(-1)
+	DPrintf("cfa[0] is %v", cfa[0])
 
 	check(t, []int{}, ck)
 
@@ -127,6 +128,7 @@ func TestBasic(t *testing.T) {
 		cfg.ShutdownServer(s)
 		for i := 0; i < len(cfa); i++ {
 			c := ck.Query(cfa[i].Num)
+			DPrintf("CHeck config in i %v, c is %v, cfa[i] is %v", i, c, cfa[i])
 			check_same_config(t, c, cfa[i])
 		}
 		cfg.StartServer(s)

@@ -2,6 +2,7 @@ package shardctrler
 
 import (
 	"bytes"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,7 +42,11 @@ type Op struct {
 	Operation string
 	RequestId int64
 	ClientId  int64
-	OpArg     interface{}
+	GIDs      []int
+	Servers   map[int][]string
+	GID       int
+	Shard     int
+	Num       int
 }
 
 func (sc *ShardCtrler) NewRequestContext(op Op) RequestContext {
@@ -58,7 +63,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	op.Operation = JOIN
 	op.RequestId = args.RequestId
 	op.ClientId = args.ClientId
-	op.OpArg = args
+	op.Servers = args.Servers
 
 	DPrintf("server %v received join request %v", sc.me, args)
 
@@ -80,6 +85,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -90,8 +96,11 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	} else {
 		sc.mu.Lock()
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 	}
+
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
@@ -100,7 +109,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	op.Operation = LEAVE
 	op.RequestId = args.RequestId
 	op.ClientId = args.ClientId
-	op.OpArg = args
+	op.GIDs = args.GIDs
 
 	DPrintf("server %v received leave request %v", sc.me, args)
 
@@ -122,6 +131,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -132,8 +142,11 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	} else {
 		sc.mu.Lock()
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 	}
+
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
@@ -142,7 +155,8 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	op.Operation = MOVE
 	op.RequestId = args.RequestId
 	op.ClientId = args.ClientId
-	op.OpArg = args
+	op.GID = args.GID
+	op.Shard = args.Shard
 
 	DPrintf("server %v received move request %v", sc.me, args)
 
@@ -164,6 +178,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -174,19 +189,22 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	} else {
 		sc.mu.Lock()
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 	}
+
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
 	op := Op{}
-	op.Operation = MOVE
+	op.Operation = QUERY
 	op.RequestId = args.RequestId
 	op.ClientId = args.ClientId
-	op.OpArg = args
+	op.Num = args.Num
 
-	DPrintf("server %v received move request %v", sc.me, args)
+	DPrintf("server %v received query request %v", sc.me, args)
 
 	// check if the same request has been applied
 	sc.mu.Lock()
@@ -206,17 +224,23 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
+		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	if ok := sc.CheckCommit(&context); ok {
+		sc.mu.Lock()
 		reply.Config = context.Value
 		DPrintf("Server %v: op %v has been committed", sc.me, op)
 	} else {
+		sc.mu.Lock()
 		reply.Err = ErrWrongLeader
+		reply.WrongLeader = true
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
 	}
+
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) MakeSnapshot() {
@@ -270,6 +294,222 @@ func (sc *ShardCtrler) CheckCommit(context *RequestContext) bool {
 	}
 }
 
+// JoinGroups join new groups and rebalance, this will produce a new group
+// should hold the lock when call this function
+func (sc *ShardCtrler) JoinGroups(JoinGroups map[int][]string) {
+	latest := sc.Configs[len(sc.Configs)-1]
+	groupShardMap := make(map[int][]int)
+
+	newGroups := make(map[int][]string)
+	newConfig := Config{len(sc.Configs), latest.Shards, newGroups}
+
+	for k, v := range JoinGroups {
+		newGroups[k] = v
+		groupShardMap[k] = []int{}
+	}
+
+	for k, v := range latest.Groups {
+		newGroups[k] = v
+		groupShardMap[k] = []int{}
+	}
+
+	for i, v := range newConfig.Shards {
+		if v == 0 {
+			continue
+		}
+		// valid shard assigned to a group
+		groupShardMap[v] = append(groupShardMap[v], i)
+	}
+
+	sortedGroups := make([]int, 0)
+	for k, _ := range newGroups {
+		sortedGroups = append(sortedGroups, k)
+	}
+
+	// no existing group, assign all shards to groups
+	for i, v := range newConfig.Shards {
+		if v == 0 {
+			sort.Slice(sortedGroups, func(i, j int) bool {
+				if len(groupShardMap[sortedGroups[i]]) == len(groupShardMap[sortedGroups[j]]) {
+					return sortedGroups[i] < sortedGroups[j]
+				}
+
+				return len(groupShardMap[sortedGroups[i]]) < len(groupShardMap[sortedGroups[j]])
+			})
+
+			minGroup := sortedGroups[0]
+			groupShardMap[minGroup] = append(groupShardMap[minGroup], i)
+			newConfig.Shards[i] = minGroup
+		}
+	}
+
+	// balance
+	unbalanced := true
+	for unbalanced {
+		// sort the group according to the num of shards and GID
+		// this is to make assignment deterministic
+		sort.Slice(sortedGroups, func(i, j int) bool {
+			if len(groupShardMap[sortedGroups[i]]) == len(groupShardMap[sortedGroups[j]]) {
+				return sortedGroups[i] < sortedGroups[j]
+			}
+
+			return len(groupShardMap[sortedGroups[i]]) < len(groupShardMap[sortedGroups[j]])
+		})
+
+		minGroup := sortedGroups[0]
+		maxGroup := sortedGroups[len(sortedGroups)-1]
+
+		// only if the diff is larger than 1, we'll move shard
+		if len(groupShardMap[maxGroup])-len(groupShardMap[minGroup]) > 1 {
+			// move min shard
+			toMove := groupShardMap[maxGroup][0]
+			for _, v := range groupShardMap[maxGroup] {
+				if v < toMove {
+					toMove = v
+				}
+			}
+			if newConfig.Shards[toMove] != maxGroup {
+				panic("The shard to move is not in the expected group")
+			}
+			newConfig.Shards[toMove] = minGroup
+			groupShardMap[maxGroup] = groupShardMap[maxGroup][1:]
+			groupShardMap[minGroup] = append(groupShardMap[minGroup], toMove)
+		} else {
+			unbalanced = false
+		}
+	}
+
+	DPrintf("Server %v has new config: %v", sc.me, newConfig)
+	sc.Configs = append(sc.Configs, newConfig)
+}
+
+// LeaveGroups leave groups and rebalance, this will produce a new group
+// should hold the lock when call this function
+func (sc *ShardCtrler) LeaveGroups(LeaveGroups []int) {
+	latest := sc.Configs[len(sc.Configs)-1]
+	groupShardMap := make(map[int][]int)
+
+	newGroups := make(map[int][]string)
+	newConfig := Config{len(sc.Configs), latest.Shards, newGroups}
+
+	for k, v := range latest.Groups {
+		toLeave := false
+		for _, group := range LeaveGroups {
+			if k == group {
+				// leave group
+				toLeave = true
+				break
+			}
+		}
+		if !toLeave {
+			newGroups[k] = v
+			groupShardMap[k] = []int{}
+		}
+	}
+
+	for i, v := range newConfig.Shards {
+		if v == 0 {
+			continue
+		}
+		toLeave := false
+		for _, group := range LeaveGroups {
+			if v == group {
+				// leave group
+				newConfig.Shards[i] = 0
+				toLeave = true
+				break
+			}
+		}
+		if !toLeave {
+			groupShardMap[v] = append(groupShardMap[v], i)
+		}
+	}
+
+	sortedGroups := make([]int, 0)
+	for k, _ := range newGroups {
+		sortedGroups = append(sortedGroups, k)
+	}
+
+	// assign all unassigned shards to groups
+	if len(newGroups) > 0 {
+		for i, v := range newConfig.Shards {
+			if v == 0 {
+				sort.Slice(sortedGroups, func(i, j int) bool {
+					if len(groupShardMap[sortedGroups[i]]) == len(groupShardMap[sortedGroups[j]]) {
+						return sortedGroups[i] < sortedGroups[j]
+					}
+
+					return len(groupShardMap[sortedGroups[i]]) < len(groupShardMap[sortedGroups[j]])
+				})
+
+				minGroup := sortedGroups[0]
+				groupShardMap[minGroup] = append(groupShardMap[minGroup], i)
+				newConfig.Shards[i] = minGroup
+			}
+		}
+
+		// balance
+		unbalanced := true
+		for unbalanced {
+			// sort the group according to the num of shards and GID
+			// this is to make assignment deterministic
+			sort.Slice(sortedGroups, func(i, j int) bool {
+				if len(groupShardMap[sortedGroups[i]]) == len(groupShardMap[sortedGroups[j]]) {
+					return sortedGroups[i] < sortedGroups[j]
+				}
+
+				return len(groupShardMap[sortedGroups[i]]) < len(groupShardMap[sortedGroups[j]])
+			})
+
+			minGroup := sortedGroups[0]
+			maxGroup := sortedGroups[len(sortedGroups)-1]
+
+			// only if the diff is larger than 1, we'll move shard
+			if len(groupShardMap[maxGroup])-len(groupShardMap[minGroup]) > 1 {
+				// move min shard
+				toMove := groupShardMap[maxGroup][0]
+				for _, v := range groupShardMap[maxGroup] {
+					if v < toMove {
+						toMove = v
+					}
+				}
+				if newConfig.Shards[toMove] != maxGroup {
+					panic("The shard to move is not in the expected group")
+				}
+				newConfig.Shards[toMove] = minGroup
+				groupShardMap[maxGroup] = groupShardMap[maxGroup][1:]
+				groupShardMap[minGroup] = append(groupShardMap[minGroup], toMove)
+			} else {
+				unbalanced = false
+			}
+		}
+	}
+
+	DPrintf("Server %v has new config: %v", sc.me, newConfig)
+	sc.Configs = append(sc.Configs, newConfig)
+}
+
+// MoveShard move shard to given GID, this will produce a new group
+// should hold the lock when call this function
+// if GID not exist in current config, this will be a no-op
+func (sc *ShardCtrler) MoveShard(Shard int, GID int) {
+	latest := sc.Configs[len(sc.Configs)-1]
+	if _, ok := latest.Groups[GID]; !ok {
+		DPrintf("Group %v not exist in config", GID)
+	} else {
+		newGroups := make(map[int][]string)
+		for k, v := range latest.Groups {
+			newServers := make([]string, len(v))
+			copy(newServers, v)
+			newGroups[k] = newServers
+		}
+		newConfig := Config{len(sc.Configs), latest.Shards, newGroups}
+		newConfig.Shards[Shard] = GID
+		DPrintf("Server %v has new config: %v", sc.me, newConfig)
+		sc.Configs = append(sc.Configs, newConfig)
+	}
+}
+
 func (sc *ShardCtrler) RunStateMachine() {
 	for m := range sc.applyCh {
 		if sc.killed() {
@@ -312,17 +552,17 @@ func (sc *ShardCtrler) RunStateMachine() {
 			var value Config
 			switch op.Operation {
 			case JOIN:
-				// TODO: add JOIN operation
+				sc.JoinGroups(op.Servers)
 			case LEAVE:
-				// TODO: add LEAVE operation
+				sc.LeaveGroups(op.GIDs)
 			case MOVE:
-				// TODO: add MOVE operation
+				sc.MoveShard(op.Shard, op.GID)
 			case QUERY:
-				arg := op.OpArg.(QueryArgs)
-				if arg.Num == -1 || arg.Num >= len(sc.Configs) {
+				num := op.Num
+				if num == -1 || num >= len(sc.Configs) {
 					value = sc.Configs[len(sc.Configs)-1]
 				} else {
-					value = sc.Configs[arg.Num]
+					value = sc.Configs[num]
 				}
 			}
 			commitContext := CommitContext{}
@@ -371,6 +611,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	sc.Configs = make([]Config, 1)
 	sc.Configs[0].Groups = map[int][]string{}
+	sc.Configs[0].Num = 0
 
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
@@ -378,6 +619,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// Your code here.
 	sc.CommitIndex = -1
+	sc.CommitMap = make(map[int64]CommitContext)
+	sc.RequestMap = make(map[int64]*RequestContext)
+
+	sc.ReadSnapshot()
+
+	// run state machine
+	go sc.RunStateMachine()
 
 	return sc
 }
