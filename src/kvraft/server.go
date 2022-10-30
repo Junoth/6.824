@@ -116,17 +116,6 @@ func (kv *KVServer) ReadSnapshot() {
 	DPrintf("Server %v: read snapshot from persister, state is %v", kv.me, kv)
 }
 
-func (kv *KVServer) GetStateSize() int {
-	buf := new(bytes.Buffer)
-	enc := labgob.NewEncoder(buf)
-	if enc.Encode(kv.KvState) != nil ||
-		enc.Encode(kv.CommitMap) != nil ||
-		enc.Encode(kv.CommitIndex) != nil {
-		panic("Fail to encode")
-	}
-	return len(buf.Bytes())
-}
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	// make an op
@@ -142,6 +131,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		DPrintf("Server %v: op %v has been committed before", kv.me, op)
 		reply.Err = OK
 		reply.Value = context.Value
+		kv.mu.Unlock()
+		return
+	}
+
+	if _, state := kv.rf.GetState(); !state {
+		DPrintf("Server %v: not the leader for op %v", kv.me, op)
+		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 		return
 	}
@@ -174,12 +170,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 	}
 
-	//DPrintf("Server %v: Max raft state is %v and raft state size is %v", kv.me, kv.maxraftstate, kv.rf.GetRaftStateSize())
-	//if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
-	//	// save snapshot
-	//	kv.MakeSnapshot()
-	//}
-
 	kv.mu.Unlock()
 }
 
@@ -208,6 +198,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	if _, state := kv.rf.GetState(); !state {
+		DPrintf("Server %v: not the leader for op %v", kv.me, op)
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+
 	// add context into map
 	context := kv.NewCommitContext(op)
 	kv.contextMap[context.op.ClientId] = &context
@@ -232,12 +229,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("Server %v: context %v commit timeout", kv.me, context)
 		reply.Err = ErrWrongLeader
 	}
-
-	//DPrintf("Server %v: Max raft state is %v and raft state size is %v", kv.me, kv.maxraftstate, kv.rf.GetRaftStateSize())
-	//if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
-	//	// save snapshot
-	//	kv.MakeSnapshot()
-	//}
 
 	kv.mu.Unlock()
 }
