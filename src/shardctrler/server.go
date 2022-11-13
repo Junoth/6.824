@@ -76,6 +76,13 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		return
 	}
 
+	if _, state := sc.rf.GetState(); !state {
+		DPrintf("Server %v: not the leader for op %v", sc.me, op)
+		reply.Err = ErrWrongLeader
+		sc.mu.Unlock()
+		return
+	}
+
 	// add context into map
 	context := sc.NewRequestContext(op)
 	sc.RequestMap[context.op.ClientId] = &context
@@ -85,18 +92,17 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	if ok := sc.CheckCommit(&context); ok {
 		sc.mu.Lock()
+		reply.Err = OK
 		DPrintf("Server %v: op %v has been committed", sc.me, op)
 	} else {
 		sc.mu.Lock()
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 	}
 
@@ -122,6 +128,13 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		return
 	}
 
+	if _, state := sc.rf.GetState(); !state {
+		DPrintf("Server %v: not the leader for op %v", sc.me, op)
+		reply.Err = ErrWrongLeader
+		sc.mu.Unlock()
+		return
+	}
+
 	// add context into map
 	context := sc.NewRequestContext(op)
 	sc.RequestMap[context.op.ClientId] = &context
@@ -131,18 +144,17 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	if ok := sc.CheckCommit(&context); ok {
 		sc.mu.Lock()
+		reply.Err = OK
 		DPrintf("Server %v: op %v has been committed", sc.me, op)
 	} else {
 		sc.mu.Lock()
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 	}
 
@@ -169,6 +181,13 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		return
 	}
 
+	if _, state := sc.rf.GetState(); !state {
+		DPrintf("Server %v: not the leader for op %v", sc.me, op)
+		reply.Err = ErrWrongLeader
+		sc.mu.Unlock()
+		return
+	}
+
 	// add context into map
 	context := sc.NewRequestContext(op)
 	sc.RequestMap[context.op.ClientId] = &context
@@ -178,18 +197,17 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	if ok := sc.CheckCommit(&context); ok {
 		sc.mu.Lock()
+		reply.Err = OK
 		DPrintf("Server %v: op %v has been committed", sc.me, op)
 	} else {
 		sc.mu.Lock()
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 	}
 
@@ -215,6 +233,13 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		return
 	}
 
+	if _, state := sc.rf.GetState(); !state {
+		DPrintf("Server %v: not the leader for op %v", sc.me, op)
+		reply.Err = ErrWrongLeader
+		sc.mu.Unlock()
+		return
+	}
+
 	// add context into map
 	context := sc.NewRequestContext(op)
 	sc.RequestMap[context.op.ClientId] = &context
@@ -224,19 +249,18 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	_, _, res := sc.rf.Start(op)
 	if !res {
 		// current server is not leader
-		reply.WrongLeader = true
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	if ok := sc.CheckCommit(&context); ok {
 		sc.mu.Lock()
+		reply.Err = OK
 		reply.Config = context.Value
 		DPrintf("Server %v: op %v has been committed", sc.me, op)
 	} else {
 		sc.mu.Lock()
 		reply.Err = ErrWrongLeader
-		reply.WrongLeader = true
 		DPrintf("Server %v: op %v commit fail", sc.me, op)
 	}
 

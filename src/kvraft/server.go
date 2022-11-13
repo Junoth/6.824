@@ -245,15 +245,9 @@ func (kv *KVServer) CheckCommit(context *RequestContext) bool {
 }
 
 func (kv *KVServer) CheckSnapshot() {
-	for kv.killed() == false {
-		kv.mu.Lock()
-		if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
-			// save snapshot
-			kv.MakeSnapshot()
-		}
-		kv.mu.Unlock()
-
-		time.Sleep(10 * time.Millisecond)
+	if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
+		// save snapshot
+		kv.MakeSnapshot()
 	}
 }
 
@@ -328,6 +322,7 @@ func (kv *KVServer) RunStateMachine() {
 				delete(kv.contextMap, op.ClientId)
 				close(context.commitChan)
 			}
+			kv.CheckSnapshot()
 			kv.mu.Unlock()
 		}
 	}
@@ -383,8 +378,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.CommitIndex = -1
 
 	kv.ReadSnapshot()
-
-	go kv.CheckSnapshot()
 
 	// You may need initialization code here.
 	go kv.RunStateMachine()

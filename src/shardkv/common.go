@@ -29,6 +29,7 @@ type PutAppendArgs struct {
 	// otherwise RPC will break.
 	RequestId int64
 	ClientId  int64
+	ConfigNum int
 }
 
 type PutAppendReply struct {
@@ -40,9 +41,14 @@ type GetArgs struct {
 	// You'll have to add definitions here.
 	RequestId int64
 	ClientId  int64
+	// Get shard
+	GetShard  bool
+	Shard     int
+	ConfigNum int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+	Shard map[string]string
 }

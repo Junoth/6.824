@@ -47,7 +47,7 @@ func (ck *Clerk) Query(num int) Config {
 	if ck.leader != -1 {
 		var reply QueryReply
 		ok := ck.servers[ck.leader].Call("ShardCtrler.Query", args, &reply)
-		if ok && reply.WrongLeader == false {
+		if ok && reply.Err == OK {
 			return reply.Config
 		}
 	}
@@ -57,7 +57,7 @@ func (ck *Clerk) Query(num int) Config {
 		for i, srv := range ck.servers {
 			var reply QueryReply
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.Err == OK {
 				ck.leader = i
 				return reply.Config
 			}
@@ -79,7 +79,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	if ck.leader != -1 {
 		var reply JoinReply
 		ok := ck.servers[ck.leader].Call("ShardCtrler.Join", args, &reply)
-		if ok && reply.WrongLeader == false {
+		if ok && reply.Err == OK {
 			return
 		}
 	}
@@ -89,7 +89,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		for i, srv := range ck.servers {
 			var reply JoinReply
 			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.Err == OK {
 				ck.leader = i
 				return
 			}
@@ -111,7 +111,7 @@ func (ck *Clerk) Leave(gids []int) {
 	if ck.leader != -1 {
 		var reply LeaveReply
 		ok := ck.servers[ck.leader].Call("ShardCtrler.Leave", args, &reply)
-		if ok && reply.WrongLeader == false {
+		if ok && reply.Err == OK {
 			return
 		}
 	}
@@ -121,7 +121,7 @@ func (ck *Clerk) Leave(gids []int) {
 		for i, srv := range ck.servers {
 			var reply LeaveReply
 			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.Err == OK {
 				ck.leader = i
 				return
 			}
@@ -144,7 +144,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 	if ck.leader != -1 {
 		var reply MoveReply
 		ok := ck.servers[ck.leader].Call("ShardCtrler.Move", args, &reply)
-		if ok && reply.WrongLeader == false {
+		if ok && reply.Err == OK {
 			return
 		}
 	}
@@ -154,7 +154,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 		for i, srv := range ck.servers {
 			var reply MoveReply
 			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+			if ok && reply.Err == OK {
 				ck.leader = i
 				return
 			}

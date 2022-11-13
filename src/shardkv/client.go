@@ -67,14 +67,14 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // keeps trying forever in the face of all other errors.
 // You will have to modify this function.
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
-	args.ClientId = ck.clientId
-	args.RequestId = ck.seqId
-
-	ck.seqId++
-
 	for {
+		args := GetArgs{}
+		args.Key = key
+		args.ClientId = ck.clientId
+		args.RequestId = ck.seqId
+		args.ConfigNum = ck.config.Num
+
+		ck.seqId++
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -87,7 +87,7 @@ func (ck *Clerk) Get(key string) string {
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
-					break
+					goto sleep
 				}
 				// ... not ok, or ErrWrongLeader
 			}
@@ -103,12 +103,9 @@ func (ck *Clerk) Get(key string) string {
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
-				// ... not ok, or ErrWrongLeader
-				if ok && (reply.Err == ErrWrongLeader) {
-
-				}
 			}
 		}
+	sleep:
 		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
@@ -130,6 +127,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.seqId++
 
 	for {
+		args.ConfigNum = ck.config.Num
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -141,8 +139,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				if ok && reply.Err == OK {
 					return
 				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
+				if ok && (reply.Err == ErrWrongGroup) {
+					goto sleep
 				}
 				// ... not ok, or ErrWrongLeader
 			}
@@ -157,9 +155,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				if ok && reply.Err == ErrWrongGroup {
 					break
 				}
-				// ... not ok, or ErrWrongLeader
 			}
 		}
+	sleep:
 		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)

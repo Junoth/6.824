@@ -14,7 +14,7 @@ import "6.824/labgob"
 
 const Debug = false
 
-func (kv *ShardKV) DPrintf(format string, a ...interface{}) (n int, err error) {
+func (kv *ShardKV) DPrintf(format string, a ...interface{}) (n int) {
 	if Debug && !kv.killed() {
 		log.Printf(format, a...)
 	}
@@ -22,10 +22,11 @@ func (kv *ShardKV) DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const (
-	GET    = "GET"
-	PUT    = "PUT"
-	APPEND = "APPEND"
-	MOVE   = "MOVE"
+	GET      = "GET"
+	PUT      = "PUT"
+	APPEND   = "APPEND"
+	MOVE     = "MOVE"
+	GETSHARD = "GETSHARD"
 )
 
 type Op struct {
@@ -37,6 +38,7 @@ type Op struct {
 	ClientId   int64
 	Key        string
 	Value      string
+	Shard      int
 	MoveShards map[string]string
 	NewConfig  shardctrler.Config
 }
@@ -46,12 +48,14 @@ type RequestContext struct {
 	op         Op
 	hasValue   bool
 	value      string
+	shardValue map[string]string
 }
 
 type CommitContext struct {
-	CommitOp Op
-	Value    string
-	HasValue bool
+	CommitOp   Op
+	Value      string
+	HasValue   bool
+	ShardValue map[string]string
 }
 
 type ShardKV struct {
@@ -71,8 +75,11 @@ type ShardKV struct {
 	contextMap       map[int64]*RequestContext
 	CommitMap        map[int64]CommitContext
 	mck              *shardctrler.Clerk
-	shardConfig      shardctrler.Config
-	lastCommitConfig int
+	ShardConfig      shardctrler.Config
+	LastCommitConfig int
+	GroupLeader      map[int]int
+	ServerId         int64
+	SeqId            int64
 }
 
 func (kv *ShardKV) NewCommitContext(op Op) RequestContext {
@@ -90,8 +97,11 @@ func (kv *ShardKV) MakeSnapshot() {
 	if enc.Encode(kv.KvState) != nil ||
 		enc.Encode(kv.CommitMap) != nil ||
 		enc.Encode(kv.CommitIndex) != nil ||
-		enc.Encode(kv.shardConfig) != nil ||
-		enc.Encode(kv.lastCommitConfig) != nil {
+		enc.Encode(kv.ShardConfig) != nil ||
+		enc.Encode(kv.LastCommitConfig) != nil ||
+		enc.Encode(kv.GroupLeader) != nil ||
+		enc.Encode(kv.ServerId) != nil ||
+		enc.Encode(kv.SeqId) != nil {
 		panic("Fail to encode")
 	}
 	data := buf.Bytes()
@@ -114,19 +124,28 @@ func (kv *ShardKV) ReadSnapshot() {
 		CommitIndex      int
 		ShardConfig      shardctrler.Config
 		LastCommitConfig int
+		GroupLeader      map[int]int
+		ServerId         int64
+		SeqId            int64
 	)
 	if dec.Decode(&KvState) != nil ||
 		dec.Decode(&CommitMap) != nil ||
 		dec.Decode(&CommitIndex) != nil ||
-		dec.Decode(&kv.shardConfig) != nil ||
-		dec.Decode(&kv.lastCommitConfig) != nil {
+		dec.Decode(&ShardConfig) != nil ||
+		dec.Decode(&LastCommitConfig) != nil ||
+		dec.Decode(&GroupLeader) != nil ||
+		dec.Decode(&ServerId) != nil ||
+		dec.Decode(&SeqId) != nil {
 		panic("Fail to decode")
 	} else {
 		kv.KvState = KvState
 		kv.CommitMap = CommitMap
 		kv.CommitIndex = CommitIndex
-		kv.shardConfig = ShardConfig
-		kv.lastCommitConfig = LastCommitConfig
+		kv.ShardConfig = ShardConfig
+		kv.LastCommitConfig = LastCommitConfig
+		kv.GroupLeader = GroupLeader
+		kv.ServerId = ServerId
+		kv.SeqId = SeqId
 	}
 
 	kv.DPrintf("Server %v: read snapshot from persister, state is %v", kv.me, kv)
@@ -136,19 +155,35 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	// make an op
 	op := Op{}
-	op.Operation = GET
+	if args.GetShard {
+		op.Operation = GETSHARD
+		op.Shard = args.Shard
+	} else {
+		op.Operation = GET
+		op.Key = args.Key
+	}
 	op.RequestId = args.RequestId
-	op.Key = args.Key
 	op.ClientId = args.ClientId
 
-	kv.DPrintf("Server %v: received op %v", kv.me, op)
+	kv.DPrintf("Server %v: received op %v", kv.me, args)
+
+	kv.mu.Lock()
+	if args.ConfigNum != kv.ShardConfig.Num {
+		kv.DPrintf("Server %v: arg %v config num not matched with server num %v", kv.me, args, kv.ShardConfig.Num)
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
 
 	// check if the same request has been applied
-	kv.mu.Lock()
 	if context, ok := kv.CommitMap[args.ClientId]; ok && context.CommitOp.RequestId == args.RequestId {
 		kv.DPrintf("Server %v: op %v has been committed before", kv.me, op)
 		reply.Err = OK
-		reply.Value = context.Value
+		if op.Operation == GET {
+			reply.Value = context.Value
+		} else {
+			reply.Shard = context.ShardValue
+		}
 		kv.mu.Unlock()
 		return
 	}
@@ -160,7 +195,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	if !kv.IsShardInGroup(key2shard(op.Key)) {
+	if op.Operation == GET && !kv.IsShardInGroup(key2shard(op.Key)) {
 		kv.DPrintf("Server %v: op %v has shard not in group %v", kv.me, op, kv.gid)
 		reply.Err = ErrWrongGroup
 		kv.mu.Unlock()
@@ -183,11 +218,16 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	if ok := kv.CheckCommit(&context); ok {
 		kv.mu.Lock()
 		kv.DPrintf("Server %v: context %v has been committed", kv.me, context)
-		if context.hasValue {
-			reply.Err = OK
-			reply.Value = context.value
+		if op.Operation == GET {
+			if context.hasValue {
+				reply.Err = OK
+				reply.Value = context.value
+			} else {
+				reply.Err = ErrNoKey
+			}
 		} else {
-			reply.Err = ErrNoKey
+			reply.Err = OK
+			reply.Shard = context.shardValue
 		}
 	} else {
 		kv.mu.Lock()
@@ -214,10 +254,17 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	op.Value = args.Value
 	op.ClientId = args.ClientId
 
-	kv.DPrintf("Server %v: received op %v", kv.me, op)
+	kv.DPrintf("Server %v: received op %v", kv.me, args)
+
+	kv.mu.Lock()
+	if args.ConfigNum != kv.ShardConfig.Num {
+		kv.DPrintf("Server %v: arg %v config num not matched with server num %v", kv.me, args, kv.ShardConfig.Num)
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
 
 	// check if the same request has been applied
-	kv.mu.Lock()
 	if context, ok := kv.CommitMap[args.ClientId]; ok && context.CommitOp.RequestId == args.RequestId {
 		kv.DPrintf("Server %v: op %v has been committed before", kv.me, op)
 		reply.Err = OK
@@ -280,47 +327,95 @@ func (kv *ShardKV) CheckCommit(context *RequestContext) bool {
 }
 
 func (kv *ShardKV) CheckSnapshot() {
-	for kv.killed() == false {
-		kv.mu.Lock()
-		if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
-			// save snapshot
-			kv.MakeSnapshot()
-		}
-		kv.mu.Unlock()
-
-		time.Sleep(10 * time.Millisecond)
+	if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
+		// save snapshot
+		kv.MakeSnapshot()
 	}
 }
 
 func (kv *ShardKV) CheckShardGroup() {
 	for kv.killed() == false {
 		newConfig := kv.mck.Query(-1)
+		op := Op{}
+		op.Operation = MOVE
+		op.NewConfig = newConfig
+		op.MoveShards = make(map[string]string)
 
 		// we should make an RPC call to remote server for new shards
 		kv.mu.Lock()
-		// I'm current leader, try to get the data from remote
-		//kv.mu.Unlock()
 
-		// TODO: make a RPC call
-		//for i, gid := range newConfig.Shards {
-		//	if gid == kv.gid && kv.shardConfig.Shards {
-		//
-		//	}
-		//}
-		//
-		//kv.mu.Lock()
-		// TODO: send op command to raft
-		if newConfig.Num > kv.lastCommitConfig && newConfig.Num > kv.shardConfig.Num {
-			op := Op{}
-			op.Operation = MOVE
-			kv.CopyConfig(&op.NewConfig, &newConfig)
-			_, _, res := kv.rf.Start(op) // only leader will start the op
-			if res {
-				kv.lastCommitConfig = newConfig.Num
-				kv.DPrintf("Server %v start the op %v and current leader is %v", kv.me, op, kv.rf.State)
+		if newConfig.Num <= kv.LastCommitConfig {
+			goto sleep
+		}
+
+		if _, isLeader := kv.rf.GetState(); !isLeader {
+			goto sleep
+		}
+
+		for i, gid := range newConfig.Shards {
+			if kv.ShardConfig.Num != 0 && gid == kv.gid && kv.ShardConfig.Shards[i] != kv.gid {
+				// this shard is new, we should ask for the data
+				// make RPC call
+				args := GetArgs{}
+				args.ClientId = kv.ServerId
+				args.RequestId = kv.SeqId
+				args.GetShard = true
+				args.Shard = i
+				args.ConfigNum = newConfig.Num
+
+				kv.SeqId++
+				if servers, ok := kv.ShardConfig.Groups[kv.ShardConfig.Shards[i]]; ok {
+					if leader, ok := kv.GroupLeader[gid]; ok {
+						// found leader info, try to call directly
+						srv := kv.make_end(servers[leader])
+
+						kv.mu.Unlock()
+						// here we need a new RPC call
+						var reply GetReply
+						ok := srv.Call("ShardKV.Get", &args, &reply)
+						kv.mu.Lock()
+						if ok && reply.Err == OK {
+							for k, v := range reply.Shard {
+								op.MoveShards[k] = v
+							}
+							continue
+						}
+					}
+
+					moveSuccess := false
+					for index, server := range servers {
+						srv := kv.make_end(server)
+
+						kv.mu.Unlock()
+						var reply GetReply
+						ok := srv.Call("ShardKV.Get", &args, &reply)
+						kv.mu.Lock()
+						if ok && reply.Err == OK {
+							for k, v := range reply.Shard {
+								op.MoveShards[k] = v
+							}
+							kv.GroupLeader[gid] = index
+							moveSuccess = true
+							break
+						}
+					}
+
+					if !moveSuccess {
+						// not able to get shard, we may get outdated config, try to sleep and retry later
+						goto sleep
+					}
+				}
 			}
 		}
 
+		if newConfig.Num > kv.LastCommitConfig && newConfig.Num > kv.ShardConfig.Num {
+			_, _, res := kv.rf.Start(op) // only leader will start the op
+			if res {
+				kv.LastCommitConfig = newConfig.Num
+				kv.DPrintf("Server %v start the op %v and current leader is %v", kv.me, op, kv.rf.State)
+			}
+		}
+	sleep:
 		kv.mu.Unlock()
 
 		time.Sleep(100 * time.Millisecond)
@@ -359,10 +454,14 @@ func (kv *ShardKV) RunStateMachine() {
 
 			// check if this is a MOVE op
 			if op.Operation == MOVE {
-				if op.NewConfig.Num > kv.shardConfig.Num {
-					kv.CopyConfig(&kv.shardConfig, &op.NewConfig)
-					kv.DPrintf("Server %v, update config to %v", kv.me, op.NewConfig)
+				if op.NewConfig.Num > kv.ShardConfig.Num {
+					kv.DPrintf("Server %v, update config from %v to %v and add shard %v", kv.me, kv.ShardConfig, op.NewConfig, op.MoveShards)
+					kv.ShardConfig = op.NewConfig
+					for k, v := range op.MoveShards {
+						kv.KvState[k] = v
+					}
 				}
+				kv.CheckSnapshot()
 				kv.mu.Unlock()
 				continue
 			}
@@ -378,6 +477,7 @@ func (kv *ShardKV) RunStateMachine() {
 
 			hasValue := false
 			value := ""
+			shardValue := make(map[string]string)
 			switch op.Operation {
 			case GET:
 				if val, ok := kv.KvState[op.Key]; ok {
@@ -394,9 +494,16 @@ func (kv *ShardKV) RunStateMachine() {
 				} else {
 					kv.KvState[op.Key] = op.Value
 				}
+			case GETSHARD:
+				for k, v := range kv.KvState {
+					if key2shard(k) == op.Shard {
+						shardValue[k] = v
+					}
+				}
 			}
 			commitContext := CommitContext{}
 			commitContext.Value = value
+			commitContext.ShardValue = shardValue
 			commitContext.HasValue = hasValue
 			commitContext.CommitOp = op
 			kv.CommitMap[op.ClientId] = commitContext
@@ -404,16 +511,18 @@ func (kv *ShardKV) RunStateMachine() {
 			if context, ok := kv.contextMap[op.ClientId]; ok && context.op.RequestId == op.RequestId {
 				context.hasValue = hasValue
 				context.value = value
+				context.shardValue = shardValue
 				kv.DPrintf("Server %v: context %v committed", kv.me, context)
 				delete(kv.contextMap, op.ClientId)
 				close(context.commitChan)
 			}
+			kv.CheckSnapshot()
 			kv.mu.Unlock()
 		}
 	}
 }
 
-// the tester calls Kill() when a ShardKV instance won't
+// Kill the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
@@ -428,7 +537,7 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-// servers[] contains the ports of the servers in this group.
+// StartServer servers[] contains the ports of the servers in this group.
 //
 // me is the index of the current server in servers[].
 //
@@ -467,7 +576,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ctrlers = ctrlers
 
 	// Your initialization code here.
-
 	// Use something like this to talk to the shardctrler:
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
@@ -477,11 +585,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.contextMap = make(map[int64]*RequestContext)
 	kv.CommitMap = make(map[int64]CommitContext) // need snapshot
 	kv.CommitIndex = -1
-	kv.lastCommitConfig = -1
+	kv.LastCommitConfig = -1
+	kv.ServerId = nrand()
+	kv.SeqId = 0
+	kv.GroupLeader = make(map[int]int)
 
 	kv.ReadSnapshot()
-
-	go kv.CheckSnapshot()
 
 	// You may need initialization code here.
 	go kv.RunStateMachine()
@@ -491,11 +600,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	return kv
 }
 
-// utils, this should be called when locked
+// IsShardInGroup utils, this should be called when locked
 func (kv *ShardKV) IsShardInGroup(shard int) bool {
-	return kv.shardConfig.Shards[shard] == kv.gid
+	return kv.ShardConfig.Shards[shard] == kv.gid
 }
 
+// CopyConfig utils, this should be called when locked
 func (kv *ShardKV) CopyConfig(dst *shardctrler.Config, src *shardctrler.Config) {
 	dst.Num = src.Num
 	for i, v := range src.Shards {
