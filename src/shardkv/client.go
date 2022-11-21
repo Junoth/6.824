@@ -67,48 +67,48 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // keeps trying forever in the face of all other errors.
 // You will have to modify this function.
 func (ck *Clerk) Get(key string) string {
-	for {
-		args := GetArgs{}
-		args.Key = key
-		args.ClientId = ck.clientId
-		args.RequestId = ck.seqId
-		args.ConfigNum = ck.config.Num
+	args := GetArgs{}
+	args.Key = key
+	args.ClientId = ck.clientId
+	args.RequestId = ck.seqId
+	ck.seqId++
 
-		ck.seqId++
+	for {
+		currentConfig := ck.config
 		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
-		if servers, ok := ck.config.Groups[gid]; ok {
+		gid := currentConfig.Shards[shard]
+		if servers, ok := currentConfig.Groups[gid]; ok {
 			// try leader if exist
 			if leader, ok := ck.groupLeader[gid]; ok {
 				srv := ck.make_end(servers[leader])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
+				if ok {
+					if reply.Err == OK || reply.Err == ErrNoKey {
+						return reply.Value
+					} else if reply.Err == ErrWrongGroup {
+						goto sleep
+					}
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					goto sleep
-				}
-				// ... not ok, or ErrWrongLeader
 			}
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					ck.groupLeader[gid] = si
-					return reply.Value
-				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
+				if ok {
+					if reply.Err == OK || reply.Err == ErrNoKey {
+						ck.groupLeader[gid] = si
+						return reply.Value
+					} else if reply.Err == ErrWrongGroup {
+						goto sleep
+					}
 				}
 			}
 		}
 	sleep:
-		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	return ""
@@ -123,44 +123,44 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Op = op
 	args.ClientId = ck.clientId
 	args.RequestId = ck.seqId
-
 	ck.seqId++
 
 	for {
-		args.ConfigNum = ck.config.Num
+		currentConfig := ck.config
 		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
-		if servers, ok := ck.config.Groups[gid]; ok {
+		gid := currentConfig.Shards[shard]
+		if servers, ok := currentConfig.Groups[gid]; ok {
 			// try leader if exist
 			if leader, ok := ck.groupLeader[gid]; ok {
 				srv := ck.make_end(servers[leader])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
-					return
+				if ok {
+					if reply.Err == OK {
+						return
+					} else if reply.Err == ErrWrongGroup {
+						goto sleep
+					}
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					goto sleep
-				}
-				// ... not ok, or ErrWrongLeader
 			}
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
-					ck.groupLeader[gid] = si
-					return
-				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
+				if ok {
+					if reply.Err == OK {
+						ck.groupLeader[gid] = si
+						return
+					} else if reply.Err == ErrWrongGroup {
+						ck.groupLeader[gid] = si
+						goto sleep
+					}
 				}
 			}
 		}
 	sleep:
-		time.Sleep(100 * time.Millisecond)
-		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

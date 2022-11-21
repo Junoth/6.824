@@ -102,6 +102,13 @@ type Raft struct {
 	commitMsgs  []ApplyMsg
 }
 
+func (rf *Raft) HasLogInCurrentTerm() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	res := rf.CurrentTerm == rf.getLastLogTerm()
+	return res
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {

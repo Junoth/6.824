@@ -43,6 +43,7 @@ type RequestContext struct {
 	op         Op
 	hasValue   bool
 	value      string
+	term       int // we should record the raft term info for the request
 }
 
 type CommitContext struct {
@@ -73,6 +74,7 @@ func (kv *KVServer) NewCommitContext(op Op) RequestContext {
 	context.op = op
 	context.hasValue = false
 	context.value = ""
+	context.term, _ = kv.rf.GetState()
 	return context
 }
 
@@ -125,16 +127,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op.Key = args.Key
 	op.ClientId = args.ClientId
 
-	// check if the same request has been applied
 	kv.mu.Lock()
-	if context, ok := kv.CommitMap[args.ClientId]; ok && context.CommitOp.RequestId == args.RequestId {
-		DPrintf("Server %v: op %v has been committed before", kv.me, op)
-		reply.Err = OK
-		reply.Value = context.Value
-		kv.mu.Unlock()
-		return
-	}
-
 	if _, state := kv.rf.GetState(); !state {
 		DPrintf("Server %v: not the leader for op %v", kv.me, op)
 		reply.Err = ErrWrongLeader
@@ -282,11 +275,13 @@ func (kv *KVServer) RunStateMachine() {
 			kv.CommitIndex = m.CommandIndex
 
 			// check if the same request has been applied once or if this is current request of client
-			if context, ok := kv.CommitMap[op.ClientId]; ok {
-				if context.CommitOp.RequestId >= op.RequestId {
-					DPrintf("Server %v: context %v is in committed state, skip", kv.me, context)
-					kv.mu.Unlock()
-					continue
+			if op.Operation == PUT || op.Operation == APPEND {
+				if context, ok := kv.CommitMap[op.ClientId]; ok {
+					if context.CommitOp.RequestId >= op.RequestId {
+						DPrintf("Server %v: context %v is in committed state, skip", kv.me, context)
+						kv.mu.Unlock()
+						continue
+					}
 				}
 			}
 
@@ -309,18 +304,25 @@ func (kv *KVServer) RunStateMachine() {
 					kv.KvState[op.Key] = op.Value
 				}
 			}
-			commitContext := CommitContext{}
-			commitContext.Value = value
-			commitContext.HasValue = hasValue
-			commitContext.CommitOp = op
-			kv.CommitMap[op.ClientId] = commitContext
+			if op.Operation == PUT || op.Operation == APPEND {
+				commitContext := CommitContext{}
+				commitContext.Value = value
+				commitContext.HasValue = hasValue
+				commitContext.CommitOp = op
+				kv.CommitMap[op.ClientId] = commitContext
+			}
 
 			if context, ok := kv.contextMap[op.ClientId]; ok && context.op.RequestId == op.RequestId {
-				context.hasValue = hasValue
-				context.value = value
-				DPrintf("Server %v: context %v committed", kv.me, context)
-				delete(kv.contextMap, op.ClientId)
-				close(context.commitChan)
+				if term, isLeader := kv.rf.GetState(); term == context.term && isLeader {
+					// Refer to https://github.com/OneSizeFitsQuorum/MIT6.824-2021/blob/master/docs/lab3.md
+					// 1. 仅对 leader 的 notifyChan 进行通知：目前的实现中读写请求都需要路由给 leader 去处理，所以在执行日志到状态机后，只有 leader 需将执行结果通过 notifyChan 唤醒阻塞的客户端协程，而 follower 则不需要；对于 leader 降级为 follower 的情况，该节点在 apply 日志后也不能对之前靠 index 标识的 channel 进行 notify，因为可能执行结果是不对应的，所以在加上只有 leader 可以 notify 的判断后，对于此刻还阻塞在该节点的客户端协程，就可以让其自动超时重试。如果读者足够细心，也会发现这里的机制依然可能会有问题，下一点会提到。
+					// 2. 仅对当前 term 日志的 notifyChan 进行通知：上一点提到，对于 leader 降级为 follower 的情况，该节点需要让阻塞的请求超时重试以避免违反线性一致性。那么有没有这种可能呢？leader 降级为 follower 后又迅速重新当选了 leader，而此时依然有客户端协程未超时在阻塞等待，那么此时 apply 日志后，根据 index 获得 channel 并向其中 push 执行结果就可能出错，因为可能并不对应。对于这种情况，最直观地解决方案就是仅对当前 term 日志的 notifyChan 进行通知，让之前 term 的客户端协程都超时重试即可。当然，目前客户端超时重试的时间是 500ms，选举超时的时间是 1s，所以严格来说并不会出现这种情况，但是为了代码的鲁棒性，最好还是这么做，否则以后万一有人将客户端超时时间改到 5s 就可能出现这种问题了。
+					context.hasValue = hasValue
+					context.value = value
+					DPrintf("Server %v: context %v committed", kv.me, context)
+					delete(kv.contextMap, op.ClientId)
+					close(context.commitChan)
+				}
 			}
 			kv.CheckSnapshot()
 			kv.mu.Unlock()
